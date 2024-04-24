@@ -53,11 +53,6 @@ pub(crate) fn bencode_value(value: &Value) -> Vec<u8> {
 }
 
 pub(crate) fn json_encode_value(value: Value) -> anyhow::Result<String> {
-    /*
-    implement custom serialization to json instead of using serde,
-    because i don't know how to easily serialize bytes as string via serde without a wrapper type,
-    and because it's really easy to do a custom one
-     */
     match value {
         Value::Int(int) => Ok(int.to_string()),
         Value::Str(str) => {
