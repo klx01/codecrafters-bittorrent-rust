@@ -7,7 +7,7 @@ use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use serde_bytes::ByteBuf;
 use crate::torrent::Torrent;
 
-const MY_PEER_ID: &str = "00112233445566778899";
+pub(crate) const MY_PEER_ID: &str = "00112233445566778899";
 const MY_PORT: u16 = 6881;
 const PEER_LENGTH: usize = 6;
 
@@ -67,7 +67,7 @@ fn deserialize_peers<'de, D: Deserializer<'de>>(deserializer: D) -> Result<Vec<S
 
 pub(crate) fn request_peers(torrent: &Torrent) -> anyhow::Result<PeersResponse> {
     let Torrent{ announce, info } = torrent;
-    
+
     let info_hash = info.get_info_hash()?;
     let query = PeersQueryData {
         info_hash: &info_hash,
@@ -87,7 +87,7 @@ pub(crate) fn request_peers(torrent: &Torrent) -> anyhow::Result<PeersResponse> 
         .build()
         .context("failed to build client")?;
     let request = client.get(url);
-    
+
     let response = request.send().context("request failed")?;
     let response = response.bytes().context("failed to get response bytes")?;
     let response = serde_bencode::from_bytes::<PeersResponseType>(&response).context("failed to parse response into structure")?;
