@@ -1,13 +1,11 @@
-use std::fs::File;
-use std::io::Read;
-use anyhow::{bail, Context};
 use clap::{Parser, Subcommand};
-use sha1::{Sha1, Digest};
-use crate::bdecode::{decode_value, decode_value_str};
-use crate::bencode::{bencode_value, json_encode_value, Value};
+use crate::custom_bdecode::{decode_value_str};
+use crate::custom_bencode::{json_encode_value};
+use crate::torrent::{parse_torrent_from_file, Torrent};
 
-mod bdecode;
-mod bencode;
+mod custom_bdecode;
+mod custom_bencode;
+mod torrent;
 
 
 #[derive(Parser)]
@@ -47,87 +45,12 @@ fn info_command(path: String) -> anyhow::Result<()> {
     Ok(())
 }
 
-const HASH_RAW_LENGTH: usize = 20;
-
 fn get_info(path: &str) -> anyhow::Result<String> {
-    let mut file = File::open(path).context("failed to open file")?;
-    let mut contents = vec![];
-    file.read_to_end(&mut contents).context("failed to read file")?;
-
-    let value = decode_value(&contents)?;
-    let Value::Dict(dict) = value else {
-        bail!("expected dictionary, got {}", value.get_variant_name());
-    };
-    let Some(announce) = dict.get("announce") else {
-        bail!("did not find announce field");
-    };
-    let Value::Str(announce) = announce else {
-        bail!("expected announce to be a string, got {}", announce.get_variant_name());
-    };
-    let announce = std::str::from_utf8(announce).context("announce is not a valid utf8")?;
-    let Some(info_value) = dict.get("info") else {
-        bail!("did not find info field");
-    };
-    let Value::Dict(info) = info_value else {
-        bail!("expected info to be dictionary, got {}", info_value.get_variant_name());
-    };
-    let Some(length) = info.get("length") else {
-        bail!("did not find length field in info");
-    };
-    let Value::Int(length) = length else {
-        bail!("expected length field to be an int, got {}", length.get_variant_name());
-    };
-    if *length < 1 {
-        bail!("expected length to be positive, got {length}");
-    }
-    let length = *length as usize;
-
-    let mut hasher = Sha1::new();
-    hasher.update(bencode_value(info_value));
-    let output = hasher.finalize();
-    let info_hash = hex::encode(output);
-
-    let Some(piece_length) = info.get("piece length") else {
-        bail!("did not find piece length field in info");
-    };
-    let Value::Int(piece_length) = piece_length else {
-        bail!("expected piece length to be an int, got {}", piece_length.get_variant_name());
-    };
-    if *piece_length < 1 {
-        bail!("expected piece length to be positive, got {piece_length}");
-    }
-    let piece_length = *piece_length as usize;
-    if piece_length > length {
-        bail!("piece length {piece_length} is larger than total length {length}");
-    }
-    let expected_piece_count = (length + piece_length - 1) / piece_length; // integer division with a ceil
-
-    let Some(pieces) = info.get("pieces") else {
-        bail!("did not find pieces field in info");
-    };
-    let Value::Str(pieces) = pieces else {
-        bail!("expected pieces to be a string, got {}", pieces.get_variant_name());
-    };
-    let pieces_len = pieces.len();
-    let actual_piece_count = pieces_len / HASH_RAW_LENGTH;
-    let remainder = pieces_len % HASH_RAW_LENGTH;
-    if remainder > 0 {
-        bail!("pieces of total length {pieces_len} can not be divided into hashes of length {HASH_RAW_LENGTH}");
-    }
-    if actual_piece_count != expected_piece_count {
-        bail!("count of hashes {actual_piece_count} does not match the count that is based on the piece length {expected_piece_count}");
-    }
-    let piece_hashes: Vec<[u8; HASH_RAW_LENGTH]> = pieces
-        .chunks(HASH_RAW_LENGTH)
-        .map(|chunk| chunk.try_into().expect("size validation was incorrect"))
-        .collect();
-    assert_eq!(actual_piece_count, piece_hashes.len(), "size validation was incorrect");
-    
-    let piece_hashes = piece_hashes
-        .into_iter()
-        .map(|hash| hex::encode(hash))
-        .collect::<Vec<_>>();
-
+    let torrent = parse_torrent_from_file(path)?;
+    let Torrent{ announce, info } = torrent;
+    let length = info.length;
+    let info_hash = info.get_info_hash()?;
+    let piece_hashes = info.get_piece_hashes().collect::<Vec<_>>();
     let res = format!(
 "Tracker URL: {announce}
 Length: {length}

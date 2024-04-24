@@ -9,6 +9,7 @@ pub(crate) enum Value<'a> {
     Dict(BTreeMap<&'a str, Value<'a>>),
 }
 impl<'a> Value<'a> {
+    #[allow(dead_code)]
     pub fn get_variant_name(&self) -> &str {
         match self {
             Value::Int(_) => "int",
@@ -19,6 +20,7 @@ impl<'a> Value<'a> {
     }
 }
 
+#[allow(dead_code)]
 pub(crate) fn bencode_value(value: &Value) -> Vec<u8> {
     let mut res = vec![];
     match value {
