@@ -1,6 +1,6 @@
 use std::collections::BTreeMap;
 use anyhow::{bail, Context};
-use crate::common::Value;
+use crate::bencode::Value;
 
 pub(crate) fn decode_value_str(input: &str) -> anyhow::Result<Value> {
     decode_value(input.as_bytes())
@@ -104,7 +104,7 @@ fn decode_dict(input: &[u8]) -> anyhow::Result<(Value, &[u8])> {
 
 #[cfg(test)]
 mod test {
-    use crate::common::json_encode_value;
+    use crate::bencode::json_encode_value;
     use super::*;
 
     #[test]

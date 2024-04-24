@@ -16,14 +16,45 @@ impl<'a> Value<'a> {
             Value::List(_) => "list",
             Value::Dict(_) => "dictionary",
         }
-    } 
+    }
+}
+
+pub(crate) fn bencode_value(value: &Value) -> Vec<u8> {
+    let mut res = vec![];
+    match value {
+        Value::Int(int) => {
+            res.extend_from_slice(format!("i{int}e").as_bytes());
+        },
+        Value::Str(str) => {
+            res.extend_from_slice(format!("{}:", str.len()).as_bytes());
+            res.extend_from_slice(str);
+        }
+        Value::List(list) => {
+            res.push(b'l');
+            for value in list {
+                res.extend_from_slice(&bencode_value(value));
+            }
+            res.push(b'e');
+        }
+        Value::Dict(dict) => {
+            res.push(b'd');
+            for (key, value) in dict {
+                let key_bytes = key.as_bytes();
+                res.extend_from_slice(format!("{}:", key_bytes.len()).as_bytes());
+                res.extend_from_slice(key_bytes);
+                res.extend_from_slice(&bencode_value(value));
+            }
+            res.push(b'e');
+        }
+    }
+    res
 }
 
 pub(crate) fn json_encode_value(value: Value) -> anyhow::Result<String> {
     /*
-    implement custom serialization to json instead of using serde, 
-    because i don't know how to easily serialize bytes as string via serde without a wrapper type, 
-    and because it's really easy to do a custom one 
+    implement custom serialization to json instead of using serde,
+    because i don't know how to easily serialize bytes as string via serde without a wrapper type,
+    and because it's really easy to do a custom one
      */
     match value {
         Value::Int(int) => Ok(int.to_string()),
