@@ -14,11 +14,29 @@ pub(crate) struct Torrent {
 #[derive(Deserialize, Serialize)]
 pub(crate) struct TorrentInfo {
     pub name: String,
-    pub length: usize,
+    #[serde(flatten)]
+    pub torrent_type: TorrentType,
     #[serde(rename = "piece length")]
     pub piece_length: usize,
     #[serde(with = "serde_bytes")]
     pieces: Vec<u8>,
+}
+
+#[derive(Deserialize, Serialize)]
+#[serde(untagged)]
+pub(crate) enum TorrentType {
+    SingleFile{
+        length: usize,
+    },
+    MultiFile{
+        files: TorrentFile,
+    },
+}
+
+#[derive(Deserialize, Serialize)]
+pub(crate) struct TorrentFile {
+    length: usize,
+    path: String,
 }
 
 impl TorrentInfo {
@@ -48,14 +66,20 @@ pub(crate) fn parse_torrent_from_file(path: &str) -> anyhow::Result<Torrent> {
 pub(crate) fn parse_torrent(data: &[u8]) -> anyhow::Result<Torrent> {
     let torrent: Torrent = serde_bencode::from_bytes(&data).context("failed to decode torrent struct")?;
     let info = &torrent.info;
-    let length = info.length;
     let piece_length = info.piece_length;
-    let pieces = &info.pieces;
-    if piece_length > length {
-        bail!("piece length {piece_length} is larger than total length {length}");
-    }
-    let expected_piece_count = (length + piece_length - 1) / piece_length; // integer division with a ceil
+    
+    let expected_piece_count = match &info.torrent_type {
+        TorrentType::SingleFile { length } => {
+            let length = *length;
+            if piece_length > length {
+                bail!("piece length {piece_length} is larger than total length {length}");
+            }
+            (length + piece_length - 1) / piece_length // integer division with a ceil
+        }
+        TorrentType::MultiFile { .. } => todo!("multi file is not implemented yet")
+    };
 
+    let pieces = &info.pieces;
     let pieces_len = pieces.len();
     let actual_piece_count = pieces_len / HASH_RAW_LENGTH;
     let remainder = pieces_len % HASH_RAW_LENGTH;

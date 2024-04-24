@@ -1,7 +1,7 @@
 use clap::{Parser, Subcommand};
 use crate::custom_bdecode::{decode_value_str};
 use crate::custom_bencode::{json_encode_value};
-use crate::torrent::{parse_torrent_from_file, Torrent};
+use crate::torrent::{parse_torrent_from_file, Torrent, TorrentType};
 
 mod custom_bdecode;
 mod custom_bencode;
@@ -48,7 +48,10 @@ fn info_command(path: String) -> anyhow::Result<()> {
 fn get_info(path: &str) -> anyhow::Result<String> {
     let torrent = parse_torrent_from_file(path)?;
     let Torrent{ announce, info } = torrent;
-    let length = info.length;
+    let length = match &info.torrent_type {
+        TorrentType::SingleFile { length } => length,
+        TorrentType::MultiFile { .. } => todo!("multi file torrents are not implemented yet")
+    };
     let info_hash = info.get_info_hash()?;
     let piece_hashes = info.get_piece_hashes().collect::<Vec<_>>();
     let res = format!(
