@@ -1,10 +1,12 @@
+use std::fs::File;
 use std::net::SocketAddrV4;
 use std::str::FromStr;
+use std::io::Write;
 use anyhow::Context;
 use clap::{Parser, Subcommand};
 use crate::custom_bdecode::{decode_value_str};
 use crate::custom_bencode::{json_encode_value};
-use crate::peer::handshake;
+use crate::peer::init_peer;
 use crate::torrent::{parse_torrent_from_file, Torrent};
 use crate::tracker::request_peers;
 
@@ -13,7 +15,6 @@ mod custom_bencode;
 mod torrent;
 mod tracker;
 mod peer;
-
 
 #[derive(Parser)]
 struct Cli {
@@ -40,6 +41,15 @@ enum Command {
         /// <ipv4>:<port>
         peer_socket: String,
     },
+    #[command(name = "download_piece")]
+    DownloadPiece {
+        /// save location
+        #[arg(short = 'o')]
+        save_location: String,
+        /// torrent file
+        torrent_path: String,
+        piece: u32,
+    }
 }
 
 fn main() -> anyhow::Result<()> {
@@ -49,6 +59,7 @@ fn main() -> anyhow::Result<()> {
         Command::Info { path } => info_command(&path),
         Command::Peers { path } => peers_command(&path),
         Command::Handshake { torrent_path, peer_socket } => handshake_command(&torrent_path, &peer_socket),
+        Command::DownloadPiece { save_location, torrent_path, piece } => download_piece_command(&torrent_path, piece, &save_location),
     }?;
     println!("{output}");
     Ok(())
@@ -89,10 +100,22 @@ fn peers_command(path: &str) -> anyhow::Result<String> {
 fn handshake_command(path: &str, socket: &str) -> anyhow::Result<String> {
     let socket = SocketAddrV4::from_str(socket).context("failed to parse socket addr")?;
     let torrent = parse_torrent_from_file(path)?;
-    let peer_id = handshake(&torrent, &socket)?;
-    let peer_id = hex::encode(peer_id);
+    let peer = init_peer(&torrent, &socket)?;
+    let peer_id = hex::encode(peer.peer_id);
     let output = format!("Peer ID: {peer_id}");
     Ok(output)
+}
+
+fn download_piece_command(torrent_path: &str, piece: u32, save_location: &str) -> anyhow::Result<String> {
+    let torrent = parse_torrent_from_file(torrent_path)?;
+    let piece_info = torrent.info.get_piece_info(piece)?; 
+    let peers = request_peers(&torrent)?;
+    let mut peer = init_peer(&torrent, &peers.peers[0])?;
+    let piece_data = peer.download_piece(piece_info)?;
+    let mut save_file = File::create(save_location).context("failed to create file")?;
+    save_file.write(&piece_data)?;
+    let ret = format!("Piece {piece} downloaded to {save_location}");
+    Ok(ret)
 }
 
 #[cfg(test)]
@@ -131,6 +154,14 @@ f00d937a0213df1982bc8d097227ad9e909acc17";
         let peers = handshake_command("sample.torrent", "165.232.33.77:51467")?;
         let expected = "Peer ID: 2d524e302e302e302d5af5c2cf488815c4a2fa7f";
         assert_eq!(expected, peers);
+        Ok(())
+    }
+
+    #[test]
+    fn test_download_piece() -> anyhow::Result<()> {
+        let output = download_piece_command("sample.torrent", 0, "download/test")?;
+        let expected = "Piece 0 downloaded to download/test";
+        assert_eq!(expected, output);
         Ok(())
     }
 }

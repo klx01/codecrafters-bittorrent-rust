@@ -1,3 +1,4 @@
+use std::cmp;
 use std::fs::File;
 use std::io::Read;
 use anyhow::{bail, Context};
@@ -18,7 +19,7 @@ pub(crate) struct TorrentInfo {
     #[serde(flatten)]
     torrent_type: TorrentType,
     #[serde(rename = "piece length")]
-    pub piece_length: usize,
+    pub piece_length: u32,
     #[serde(deserialize_with = "deserialize_pieces", serialize_with = "serialize_pieces")]
     pub pieces: Vec<[u8; HASH_RAW_LENGTH]>,
 }
@@ -45,7 +46,7 @@ fn serialize_pieces<S: Serializer>(v: &Vec<[u8; HASH_RAW_LENGTH]>, ser: S) -> Re
 #[serde(untagged)]
 pub(crate) enum TorrentType {
     SingleFile{
-        length: usize,
+        length: u32,
     },
     MultiFile{
         files: TorrentFile,
@@ -56,6 +57,13 @@ pub(crate) enum TorrentType {
 pub(crate) struct TorrentFile {
     length: usize,
     path: String,
+}
+
+#[derive(Debug, PartialEq)]
+pub(crate) struct PieceInfo {
+    pub index: u32,
+    pub length: u32,
+    pub hash: [u8; HASH_RAW_LENGTH],
 }
 
 impl TorrentInfo {
@@ -74,11 +82,30 @@ impl TorrentInfo {
             .map(|hash| hex::encode(hash))
     }
 
-    pub fn get_length(&self) -> usize {
+    pub fn get_length(&self) -> u32 {
         match self.torrent_type {
             TorrentType::SingleFile { length } => length,
             TorrentType::MultiFile { .. } => todo!("multi file is not implemented yet")
         }
+    }
+
+    pub fn get_piece_info(&self, index: u32) -> anyhow::Result<PieceInfo> {
+        let pieces_count = self.pieces.len();
+        let index_usize = index as usize;
+        if index_usize >= pieces_count {
+            bail!("invalid piece index {index}, torrent only has {pieces_count}");
+        }
+        
+        let piece_start = index * self.piece_length;
+        let left_size = self.get_length() - piece_start;  
+        let piece_length = cmp::min(left_size, self.piece_length);
+
+        let info = PieceInfo {
+            index,
+            length: piece_length,
+            hash: self.pieces[index_usize],
+        };
+        Ok(info)
     }
 }
 
@@ -100,8 +127,52 @@ pub(crate) fn parse_torrent(data: &[u8]) -> anyhow::Result<Torrent> {
     }
     let expected_piece_count = (length + piece_length - 1) / piece_length; // integer division with a ceil
 
-    if info.pieces.len() != expected_piece_count {
+    if info.pieces.len() != (expected_piece_count as usize) {
         bail!("count of hashes {} does not match the count that is based on the piece length {expected_piece_count}", info.pieces.len());
     }
+    if info.pieces.len() == 0 {
+        bail!("torrent has no pieces!");
+    }
     Ok(torrent)
+}
+
+#[cfg(test)]
+mod test {
+    use super::*;
+    
+    #[test]
+    fn test_get_piece_info() {
+        let info = TorrentInfo{
+            name: "test".to_string(),
+            torrent_type: TorrentType::SingleFile {
+                length: 100,
+            },
+            piece_length: 100,
+            pieces: vec![get_hash(1)],
+        };
+        let piece_info = info.get_piece_info(0).expect("piece 0 should exist");
+        assert_eq!(PieceInfo{index: 0, length: 100, hash: get_hash(1)}, piece_info);
+        let piece_info = info.get_piece_info(1);
+        assert!(piece_info.is_err(), "piece 1 should not exist");
+        
+        let info = TorrentInfo{
+            name: "test".to_string(),
+            torrent_type: TorrentType::SingleFile {
+                length: 101,
+            },
+            piece_length: 100,
+            pieces: vec![get_hash(1), get_hash(2)],
+        };
+        let piece_info = info.get_piece_info(0).expect("piece 0 should exist");
+        assert_eq!(PieceInfo{index: 0, length: 100, hash: get_hash(1)}, piece_info);
+        let piece_info = info.get_piece_info(1).expect("piece 1 should exist");
+        assert_eq!(PieceInfo{index: 1, length: 1, hash: get_hash(2)}, piece_info);
+        let piece_info = info.get_piece_info(2);
+        assert!(piece_info.is_err(), "piece 2 should not exist");
+    }
+    
+    fn get_hash(val: u8) -> [u8; HASH_RAW_LENGTH] {
+        let hash = [val; HASH_RAW_LENGTH];
+        hash
+    }
 }

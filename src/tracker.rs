@@ -8,6 +8,8 @@ use serde_bytes::ByteBuf;
 use crate::torrent::Torrent;
 
 pub(crate) const MY_PEER_ID: &str = "00112233445566778899";
+pub(crate) const PEER_ID_LEN: usize = MY_PEER_ID.len();
+
 const MY_PORT: u16 = 6881;
 const PEER_LENGTH: usize = 6;
 
@@ -17,9 +19,9 @@ struct PeersQueryData<'a> {
     info_hash: &'a [u8; 20],
     peer_id: &'static str,
     port: u16,
-    uploaded: usize,
-    downloaded: usize,
-    left: usize,
+    uploaded: u32,
+    downloaded: u32,
+    left: u32,
     #[serde(serialize_with = "bool_to_int")]
     compact: bool,
 }
@@ -37,6 +39,7 @@ enum PeersResponseType {
     },
 }
 #[derive(Deserialize)]
+#[allow(dead_code)]
 pub(crate) struct PeersResponse {
     pub complete: usize,
     pub incomplete: usize,
@@ -95,6 +98,9 @@ pub(crate) fn request_peers(torrent: &Torrent) -> anyhow::Result<PeersResponse> 
         PeersResponseType::Success(res) => res,
         PeersResponseType::Fail{reason} => bail!("got error response {reason}"),
     };
+    if response.peers.len() == 0 {
+        bail!("torrent has no peers!");
+    }
 
     Ok(response)
 }
