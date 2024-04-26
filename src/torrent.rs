@@ -88,6 +88,13 @@ impl TorrentInfo {
             TorrentType::MultiFile { .. } => todo!("multi file is not implemented yet")
         }
     }
+    
+    pub fn is_single_file(&self) -> bool {
+        match self.torrent_type {
+            TorrentType::SingleFile { .. } => true,
+            _ => false,
+        }
+    }
 
     pub fn get_piece_info(&self, index: u32) -> anyhow::Result<PieceInfo> {
         let pieces_count = self.pieces.len();

@@ -76,9 +76,6 @@ impl Peer {
             bail!("peer does not have piece {piece_index}");
         }
 
-        self.write_message(MessageType::Interested, &[])?;
-        let _ = self.read_message(MessageType::Unchoke)?;
-
         let mut full_piece = Vec::with_capacity(piece_size as usize);
         let mut block_no = 0;
         while let Some((block_start, block_length)) = Self::next_block_params(block_no, piece_size) {
@@ -138,6 +135,8 @@ pub(crate) fn init_peer(torrent: &Torrent, socket: &SocketAddrV4) -> anyhow::Res
     if has_pieces.iter().all(|x| *x == 0) {
         bail!("peer has no pieces");
     }
+    write_message(&mut tcp, MessageType::Interested, &[])?;
+    let _ = read_message(&mut tcp, MessageType::Unchoke)?;
     let peer = Peer{ tcp, peer_id, has_pieces };
     Ok(peer)
 }
