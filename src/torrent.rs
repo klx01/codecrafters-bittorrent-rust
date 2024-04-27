@@ -1,10 +1,10 @@
 use std::cmp;
-use std::fs::File;
-use std::io::Read;
 use anyhow::{bail, Context};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use serde_bytes::ByteBuf;
 use sha1::{Digest, Sha1};
+use tokio::fs::File;
+use tokio::io::AsyncReadExt;
 
 pub(crate) const HASH_RAW_LENGTH: usize = 20;
 
@@ -116,10 +116,10 @@ impl TorrentInfo {
     }
 }
 
-pub(crate) fn parse_torrent_from_file(path: &str) -> anyhow::Result<Torrent> {
-    let mut file = File::open(path).context("failed to open file")?;
+pub(crate) async fn parse_torrent_from_file(path: &str) -> anyhow::Result<Torrent> {
+    let mut file = File::open(path).await.context("failed to open file")?;
     let mut contents = vec![];
-    file.read_to_end(&mut contents).context("failed to read file")?;
+    file.read_to_end(&mut contents).await.context("failed to read file")?;
     parse_torrent(&contents)
 }
 

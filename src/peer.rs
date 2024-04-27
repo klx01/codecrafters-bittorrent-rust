@@ -1,9 +1,12 @@
-use std::net::{SocketAddrV4, TcpStream};
-use std::io::{Read, Write};
+use std::net::{SocketAddrV4};
 use std::{cmp, mem, slice};
+use std::future::Future;
 use std::time::Duration;
 use anyhow::{bail, Context};
 use sha1::{Digest, Sha1};
+use tokio::net::TcpStream;
+use tokio::io::{AsyncWriteExt, AsyncReadExt};
+use tokio::time::timeout;
 use crate::torrent::{HASH_RAW_LENGTH, PieceInfo, Torrent};
 use crate::tracker::{MY_PEER_ID, PEER_ID_LEN};
 
@@ -58,18 +61,18 @@ pub(crate) struct Peer {
     pub has_pieces: Vec<u8>,
 }
 impl Peer {
-    fn read_message(&mut self, expect_type: MessageType) -> anyhow::Result<Vec<u8>> {
-        read_message(&mut self.tcp, expect_type)
+    async fn read_message(&mut self, expect_type: MessageType) -> anyhow::Result<Vec<u8>> {
+        read_message(&mut self.tcp, expect_type).await
     }
-    fn write_message(&mut self, msg_type: MessageType, data: &[u8]) -> anyhow::Result<()> {
-        write_message(&mut self.tcp, msg_type, data)
+    async fn write_message(&mut self, msg_type: MessageType, data: &[u8]) -> anyhow::Result<()> {
+        write_message(&mut self.tcp, msg_type, data).await
     }
 
     pub fn has_piece(&self, piece_index: u32) -> bool {
         piece_exists(piece_index, &self.has_pieces)
     }
 
-    pub fn download_piece(&mut self, piece_info: PieceInfo) -> anyhow::Result<Vec<u8>> {
+    pub async fn download_piece(&mut self, piece_info: PieceInfo) -> anyhow::Result<Vec<u8>> {
         let PieceInfo{ index: piece_index, length: piece_size, hash: piece_hash } = piece_info;
 
         if !self.has_piece(piece_index) {
@@ -81,9 +84,9 @@ impl Peer {
         while let Some((block_start, block_length)) = Self::next_block_params(block_no, piece_size) {
             block_no += 1;
             let block_request = BlockRequestRaw::new(piece_index, block_start, block_length);
-            self.write_message(MessageType::Block, unsafe { get_bytes_ref_of_struct(&block_request) })?;
+            self.write_message(MessageType::Block, unsafe { get_bytes_ref_of_struct(&block_request) }).await?;
 
-            let block_response = self.read_message(MessageType::Piece)?;
+            let block_response = self.read_message(MessageType::Piece).await?;
             let block = Self::extract_block_from_response(&block_response, piece_index, block_no, block_start, block_length)?;
             full_piece.extend_from_slice(block);
         }
@@ -127,44 +130,37 @@ impl Peer {
     }
 }
 
-pub(crate) fn init_peer(torrent: &Torrent, socket: &SocketAddrV4) -> anyhow::Result<Peer> {
+pub(crate) async fn init_peer(torrent: &Torrent, socket: &SocketAddrV4) -> anyhow::Result<Peer> {
     let info_hash = torrent.info.get_info_hash()?;
-    let mut tcp = create_connection(socket)?;
-    let peer_id = handshake(&mut tcp, &info_hash)?;
-    let has_pieces = read_message(&mut tcp, MessageType::PiecesBitfield)?;
+    let mut tcp = TcpStream::connect(socket).await.context("failed to connect")?;
+    let peer_id = handshake(&mut tcp, &info_hash).await?;
+    let has_pieces = read_message(&mut tcp, MessageType::PiecesBitfield).await?;
     if has_pieces.iter().all(|x| *x == 0) {
         bail!("peer has no pieces");
     }
-    write_message(&mut tcp, MessageType::Interested, &[])?;
-    let _ = read_message(&mut tcp, MessageType::Unchoke)?;
+    write_message(&mut tcp, MessageType::Interested, &[]).await?;
+    let _ = read_message(&mut tcp, MessageType::Unchoke).await?;
     let peer = Peer{ tcp, peer_id, has_pieces };
     Ok(peer)
 }
 
-fn create_connection(socket: &SocketAddrV4) -> anyhow::Result<TcpStream> {
-    let tcp_stream = TcpStream::connect(socket).context("failed to connect")?;
-    let timeout = Some(Duration::from_secs(2));
-    tcp_stream.set_write_timeout(timeout).context("failed to set write timeout")?;
-    tcp_stream.set_read_timeout(timeout).context("failed to set write timeout")?;
-    Ok(tcp_stream)
-}
-
-fn handshake(tcp: &mut TcpStream, info_hash: &[u8; 20]) -> anyhow::Result<[u8; PEER_ID_LEN]> {
-    let mut handshake_message = HandshakeMessage {
-        length: PROTOCOL_HEADER.len() as u8,
-        header: PROTOCOL_HEADER.as_bytes().try_into().unwrap(),
-        padding: PADDING.try_into().unwrap(),
-        info_hash: info_hash.clone(),
-        peer_id: MY_PEER_ID.as_bytes().try_into().unwrap(),
+async fn handshake(tcp: &mut TcpStream, info_hash: &[u8; 20]) -> anyhow::Result<[u8; PEER_ID_LEN]> {
+    let handshake = async {
+        let mut handshake_message = HandshakeMessage {
+            length: PROTOCOL_HEADER.len() as u8,
+            header: PROTOCOL_HEADER.as_bytes().try_into().unwrap(),
+            padding: PADDING.try_into().unwrap(),
+            info_hash: info_hash.clone(),
+            peer_id: MY_PEER_ID.as_bytes().try_into().unwrap(),
+        };
+        let handshake_bytes = unsafe { get_bytes_ref_of_struct_mut(&mut handshake_message) };
+        tcp.write_all(handshake_bytes).await.context("failed to send handshake")?;
+        tcp.flush().await.context("failed to flush handshake")?;
+        tcp.read_exact(handshake_bytes).await.context("failed to read handshake")?;
+        Ok(handshake_message)
     };
-    let handshake_bytes = unsafe { get_bytes_ref_of_struct_mut(&mut handshake_message) };
-
-    tcp.write_all(handshake_bytes).context("failed to send handshake")?;
-    tcp.flush().context("failed to flush handshake")?;
-
-    tcp.read_exact(handshake_bytes).context("failed to read handshake")?;
+    let handshake_message = do_with_timeout(handshake).await?;
     validate_handshake(info_hash, &handshake_message)?;
-
     let peer_id = handshake_message.peer_id;
     Ok(peer_id)
 }
@@ -182,6 +178,12 @@ unsafe fn get_bytes_ref_of_struct<T: Sized>(struct_ref: &T) -> &[u8] {
     )
 }
 
+async fn do_with_timeout<T: Sized>(future: impl Future<Output = anyhow::Result<T>> + Sized) -> anyhow::Result<T> {
+    let action = timeout(Duration::from_millis(1500), future);
+    let result = action.await.context("operation timed out")?;
+    result
+}
+
 fn validate_handshake(info_hash: &[u8; 20], handshake_message: &HandshakeMessage) -> anyhow::Result<()> {
     if handshake_message.length != (PROTOCOL_HEADER.len() as u8) {
         bail!("received invalid header length {}", handshake_message.length);
@@ -195,39 +197,45 @@ fn validate_handshake(info_hash: &[u8; 20], handshake_message: &HandshakeMessage
     Ok(())
 }
 
-fn read_message(tcp: &mut TcpStream, expect_type: MessageType) -> anyhow::Result<Vec<u8>> {
-    let mut message_length_bytes = [0u8; 4];
-    tcp.read_exact(&mut message_length_bytes).context(format!("failed to read message length for {expect_type:?}"))?;
-    let message_length = u32::from_be_bytes(message_length_bytes);
-    assert!(message_length > 0, "got a heartbeat message, not prepared for that");
-    let data_length = message_length - 1;
-    if data_length > MAX_LENGTH {
-        bail!("received too large message length {data_length} for {expect_type:?} {message_length_bytes:?}");
-    }
+async fn read_message(tcp: &mut TcpStream, expect_type: MessageType) -> anyhow::Result<Vec<u8>> {
+    let read = async {
+        let mut message_length_bytes = [0u8; 4];
+        tcp.read_exact(&mut message_length_bytes).await.context(format!("failed to read message length for {expect_type:?}"))?;
+        let message_length = u32::from_be_bytes(message_length_bytes);
+        assert!(message_length > 0, "got a heartbeat message, not prepared for that");
+        let data_length = message_length - 1;
+        if data_length > MAX_LENGTH {
+            bail!("received too large message length {data_length} {message_length_bytes:?}");
+        }
 
-    let mut msg_type = [0u8];
-    tcp.read_exact(&mut msg_type).context(format!("failed to read message type for {expect_type:?}"))?;
-    let msg_type = msg_type[0];
-    if msg_type != (expect_type as u8) {
-        bail!("got message of type {msg_type} instead of expected {expect_type:?}");
-    }
+        let mut msg_type = [0u8];
+        tcp.read_exact(&mut msg_type).await.context("failed to read message type")?;
+        let msg_type = msg_type[0];
+        if msg_type != (expect_type as u8) {
+            bail!("got message of type {msg_type} instead of expected {expect_type:?}");
+        }
 
-    let mut data = vec![0u8; data_length as usize];
-    if data_length > 0 {
-        tcp.read_exact(&mut data).context(format!("failed to read message data for {expect_type:?}"))?;
-    }
-    Ok(data)
+        let mut data = vec![0u8; data_length as usize];
+        if data_length > 0 {
+            tcp.read_exact(&mut data).await.context("failed to read message data")?;
+        }
+        Ok(data)
+    };
+    do_with_timeout(read).await.context(format!("reading message {expect_type:?}"))
 }
 
-fn write_message(tcp: &mut TcpStream, msg_type: MessageType, data: &[u8]) -> anyhow::Result<()> {
-    let length = (data.len() + 1) as u32; // length of the whole message, including the type, not just data
-    tcp.write_all(&length.to_be_bytes()).context("failed to write message length")?;
-    tcp.write_all(&[msg_type as u8]).context("failed to write message type")?;
-    if length > 0 {
-        tcp.write_all(&data).context("failed to write message data")?;
-    }
-    tcp.flush().context("failed to flush message")?;
-    Ok(())
+async fn write_message(tcp: &mut TcpStream, msg_type: MessageType, data: &[u8]) -> anyhow::Result<()> {
+    let write = async {
+        let length = (data.len() + 1) as u32; // length of the whole message, including the type, not just data
+        tcp.write_all(&length.to_be_bytes()).await.context("failed to write message length")?;
+        tcp.write_all(&[msg_type as u8]).await.context("failed to write message type")?;
+        if length > 0 {
+            tcp.write_all(&data).await.context("failed to write message data")?;
+        }
+        tcp.flush().await.context("failed to flush message")?;
+        Ok(())
+    };
+    do_with_timeout(write).await
 }
 
 fn piece_exists(piece_index: u32, pieces_bitmap: &[u8]) -> bool {

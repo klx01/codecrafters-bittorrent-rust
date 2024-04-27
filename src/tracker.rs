@@ -1,7 +1,7 @@
 use std::net::{Ipv4Addr, SocketAddrV4};
 use std::time::Duration;
 use anyhow::{bail, Context};
-use reqwest::blocking::Client;
+use reqwest::Client;
 use reqwest::Url;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use serde_bytes::ByteBuf;
@@ -68,7 +68,7 @@ fn deserialize_peers<'de, D: Deserializer<'de>>(deserializer: D) -> Result<Vec<S
     Ok(peers)
 }
 
-pub(crate) fn request_peers(torrent: &Torrent) -> anyhow::Result<PeersResponse> {
+pub(crate) async fn request_peers(torrent: &Torrent) -> anyhow::Result<PeersResponse> {
     let Torrent{ announce, info } = torrent;
 
     let info_hash = info.get_info_hash()?;
@@ -86,13 +86,13 @@ pub(crate) fn request_peers(torrent: &Torrent) -> anyhow::Result<PeersResponse> 
     url.set_query(Some(&query_string));
 
     let client = Client::builder()
-        .timeout(Duration::from_secs(10))
+        .timeout(Duration::from_millis(1500))
         .build()
         .context("failed to build client")?;
     let request = client.get(url);
 
-    let response = request.send().context("request failed")?;
-    let response = response.bytes().context("failed to get response bytes")?;
+    let response = request.send().await.context("request failed")?;
+    let response = response.bytes().await.context("failed to get response bytes")?;
     let response = serde_bencode::from_bytes::<PeersResponseType>(&response).context("failed to parse response into structure")?;
     let response = match response {
         PeersResponseType::Success(res) => res,
