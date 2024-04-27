@@ -7,7 +7,7 @@ use sha1::{Digest, Sha1};
 use tokio::net::TcpStream;
 use tokio::io::{AsyncWriteExt, AsyncReadExt};
 use tokio::time::timeout;
-use crate::torrent::{HASH_RAW_LENGTH, PieceInfo, Torrent};
+use crate::torrent::{HASH_RAW_LENGTH, PieceInfo};
 use crate::tracker::{MY_PEER_ID, PEER_ID_LEN};
 
 const PROTOCOL_HEADER: &str = "BitTorrent protocol";
@@ -73,7 +73,7 @@ impl Peer {
     }
 
     pub async fn download_piece(&mut self, piece_info: PieceInfo) -> anyhow::Result<Vec<u8>> {
-        let PieceInfo{ index: piece_index, length: piece_size, hash: piece_hash } = piece_info;
+        let PieceInfo{ index: piece_index, length: piece_size, hash: piece_hash, .. } = piece_info;
 
         if !self.has_piece(piece_index) {
             bail!("peer does not have piece {piece_index}");
@@ -130,8 +130,7 @@ impl Peer {
     }
 }
 
-pub(crate) async fn init_peer(torrent: &Torrent, socket: &SocketAddrV4) -> anyhow::Result<Peer> {
-    let info_hash = torrent.info.get_info_hash()?;
+pub(crate) async fn init_peer(info_hash: [u8; 20], socket: &SocketAddrV4) -> anyhow::Result<Peer> {
     let mut tcp = TcpStream::connect(socket).await.context("failed to connect")?;
     let peer_id = handshake(&mut tcp, &info_hash).await?;
     let has_pieces = read_message(&mut tcp, MessageType::PiecesBitfield).await?;

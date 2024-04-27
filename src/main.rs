@@ -1,11 +1,16 @@
+use std::cmp;
 use std::io::SeekFrom;
 use std::net::SocketAddrV4;
+use std::ops::Deref;
 use std::str::FromStr;
 use std::path::Path;
+use std::sync::Arc;
 use anyhow::{bail, Context};
 use clap::{Parser, Subcommand};
 use tokio::fs::File;
 use tokio::io::{AsyncWriteExt, AsyncSeekExt};
+use tokio::sync::Mutex;
+use tokio::task::JoinSet;
 use crate::custom_bdecode::{decode_value_str};
 use crate::custom_bencode::{json_encode_value};
 use crate::peer::init_peer;
@@ -111,7 +116,8 @@ async fn peers_command(path: &str) -> anyhow::Result<String> {
 async fn handshake_command(path: &str, socket: &str) -> anyhow::Result<String> {
     let socket = SocketAddrV4::from_str(socket).context("failed to parse socket addr")?;
     let torrent = parse_torrent_from_file(path).await?;
-    let peer = init_peer(&torrent, &socket).await?;
+    let info_hash = torrent.info.get_info_hash()?;
+    let peer = init_peer(info_hash, &socket).await?;
     let peer_id = hex::encode(peer.peer_id);
     let output = format!("Peer ID: {peer_id}");
     Ok(output)
@@ -121,7 +127,8 @@ async fn download_piece_command(torrent_path: &str, piece: u32, save_location: &
     let torrent = parse_torrent_from_file(torrent_path).await?;
     let piece_info = torrent.info.get_piece_info(piece)?;
     let peers = request_peers(&torrent).await?;
-    let mut peer = init_peer(&torrent, &peers.peers[0]).await?;
+    let info_hash = torrent.info.get_info_hash()?;
+    let mut peer = init_peer(info_hash, &peers.peers[0]).await?;
     let piece_data = peer.download_piece(piece_info).await?;
     let mut save_file = File::create(save_location).await.context("failed to create file")?;
     save_file.write(&piece_data).await?;
@@ -134,19 +141,43 @@ async fn download_command(torrent_path: &str, save_location: &str) -> anyhow::Re
     if !torrent.info.is_single_file() {
         bail!("only single file torrents are supported");
     }
+    let info_hash = torrent.info.get_info_hash()?;
     let peers = request_peers(&torrent).await?;
 
     let file_length = torrent.info.get_length(); // this is correct only for single-file torrents!!!
-    let mut file = create_file_with_reserved_size(save_location, file_length as u64).await?;
-    let mut peer = init_peer(&torrent, &peers.peers[0]).await?;
+    let file = create_file_with_reserved_size(save_location, file_length as u64).await?;
+    let file = Arc::new(Mutex::new(file));
 
-    let pieces_count = torrent.info.pieces.len() as u32;
-    for piece in 0..pieces_count {
-        let piece_info = torrent.info.get_piece_info(piece)?;
-        let piece_data = peer.download_piece(piece_info).await?;
-        let start = piece * torrent.info.piece_length;
-        file.seek(SeekFrom::Start(start as u64)).await.context("failed to seek file for write")?;
-        file.write(&piece_data).await.context("failed to write data to file")?;
+    let pieces = torrent.info.get_all_pieces_info().collect::<Vec<_>>();
+    let pieces = Arc::new(std::sync::Mutex::new(pieces));
+    let pieces_count = torrent.info.pieces.len();
+    let peers_count = peers.peers.len();
+    let threads_count = cmp::min(pieces_count, peers_count);
+    let mut join_set = JoinSet::new();
+    for thread_no in 0..threads_count {
+        let socket = peers.peers[thread_no];
+        let file = file.clone();
+        let pieces = pieces.clone();
+        join_set.spawn(async move {
+            let mut peer = init_peer(info_hash, &socket).await?;
+            while let Some(piece_info) = pop_mutex_vec(pieces.deref()) {
+                let file_start_pos = piece_info.file_start_pos;
+                // todo: maybe download blocks of the same piece in parallel too
+                let piece_data = peer.download_piece(piece_info).await?;
+                // todo: maybe dump data into multiple files, and then assemble
+                let mut file_guard = file.lock().await;
+                file_guard.seek(SeekFrom::Start(file_start_pos as u64)).await.context("failed to seek file for write")?;
+                file_guard.write(&piece_data).await.context("failed to write data to file")?;
+                drop(file_guard);
+            }
+            Ok(())
+        });
+    }
+
+    while let Some(result) = join_set.join_next().await {
+        // all futures should be dropped when JoinSet is dropped, so it's ok to just exit
+        let result: anyhow::Result<()> = result.context("join error")?;
+        result?
     }
 
     let ret = format!("Downloaded {torrent_path} to {save_location}");
@@ -158,6 +189,10 @@ async fn create_file_with_reserved_size(path: impl AsRef<Path>, file_size: u64) 
     file.seek(SeekFrom::Start(file_size - 1)).await.context("failed to seek file for reserve")?;
     file.write(&[0]).await.context("failed to write file for reserve")?;
     Ok(file)
+}
+
+fn pop_mutex_vec<T>(mutex_vec: &std::sync::Mutex<Vec<T>>) -> Option<T> {
+    mutex_vec.lock().expect("poisoned lock").pop()
 }
 
 #[cfg(test)]

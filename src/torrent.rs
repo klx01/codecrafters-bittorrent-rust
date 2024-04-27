@@ -64,6 +64,7 @@ pub(crate) struct PieceInfo {
     pub index: u32,
     pub length: u32,
     pub hash: [u8; HASH_RAW_LENGTH],
+    pub file_start_pos: u32,
 }
 
 impl TorrentInfo {
@@ -88,7 +89,7 @@ impl TorrentInfo {
             TorrentType::MultiFile { .. } => todo!("multi file is not implemented yet")
         }
     }
-    
+
     pub fn is_single_file(&self) -> bool {
         match self.torrent_type {
             TorrentType::SingleFile { .. } => true,
@@ -102,17 +103,23 @@ impl TorrentInfo {
         if index_usize >= pieces_count {
             bail!("invalid piece index {index}, torrent only has {pieces_count}");
         }
-        
+        let info = self.get_piece_info_internal(index);
+        Ok(info)
+    }
+    fn get_piece_info_internal(&self, index: u32) -> PieceInfo {
         let piece_start = index * self.piece_length;
-        let left_size = self.get_length() - piece_start;  
+        let left_size = self.get_length() - piece_start;
         let piece_length = cmp::min(left_size, self.piece_length);
-
-        let info = PieceInfo {
+        PieceInfo {
             index,
             length: piece_length,
-            hash: self.pieces[index_usize],
-        };
-        Ok(info)
+            hash: self.pieces[index as usize],
+            file_start_pos: piece_start,
+        }
+    }
+    pub fn get_all_pieces_info(&self) -> impl Iterator<Item = PieceInfo> + '_ {
+        (0..self.pieces.len() as u32)
+            .map(|piece| self.get_piece_info_internal(piece))
     }
 }
 
@@ -146,7 +153,7 @@ pub(crate) fn parse_torrent(data: &[u8]) -> anyhow::Result<Torrent> {
 #[cfg(test)]
 mod test {
     use super::*;
-    
+
     #[test]
     fn test_get_piece_info() {
         let info = TorrentInfo{
@@ -158,10 +165,10 @@ mod test {
             pieces: vec![get_hash(1)],
         };
         let piece_info = info.get_piece_info(0).expect("piece 0 should exist");
-        assert_eq!(PieceInfo{index: 0, length: 100, hash: get_hash(1)}, piece_info);
+        assert_eq!(PieceInfo{index: 0, length: 100, hash: get_hash(1), file_start_pos: 0}, piece_info);
         let piece_info = info.get_piece_info(1);
         assert!(piece_info.is_err(), "piece 1 should not exist");
-        
+
         let info = TorrentInfo{
             name: "test".to_string(),
             torrent_type: TorrentType::SingleFile {
@@ -171,13 +178,13 @@ mod test {
             pieces: vec![get_hash(1), get_hash(2)],
         };
         let piece_info = info.get_piece_info(0).expect("piece 0 should exist");
-        assert_eq!(PieceInfo{index: 0, length: 100, hash: get_hash(1)}, piece_info);
+        assert_eq!(PieceInfo{index: 0, length: 100, hash: get_hash(1), file_start_pos: 0}, piece_info);
         let piece_info = info.get_piece_info(1).expect("piece 1 should exist");
-        assert_eq!(PieceInfo{index: 1, length: 1, hash: get_hash(2)}, piece_info);
+        assert_eq!(PieceInfo{index: 1, length: 1, hash: get_hash(2), file_start_pos: 100}, piece_info);
         let piece_info = info.get_piece_info(2);
         assert!(piece_info.is_err(), "piece 2 should not exist");
     }
-    
+
     fn get_hash(val: u8) -> [u8; HASH_RAW_LENGTH] {
         let hash = [val; HASH_RAW_LENGTH];
         hash
